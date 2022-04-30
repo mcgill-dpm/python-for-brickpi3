@@ -5,17 +5,37 @@ import os
 import re
 import sys
 import unittest
+import warnings
 from test import support
-from distutils.util import get_platform
+from test.support import import_helper
 from contextlib import contextmanager
 from .util import temp_module
 
-support.import_module('winreg', required_on=['win'])
+import_helper.import_module('winreg', required_on=['win'])
 from winreg import (
     CreateKey, HKEY_CURRENT_USER,
     SetValue, REG_SZ, KEY_ALL_ACCESS,
     EnumKey, CloseKey, DeleteKey, OpenKey
 )
+
+def get_platform():
+    # Port of distutils.util.get_platform().
+    TARGET_TO_PLAT = {
+            'x86' : 'win32',
+            'x64' : 'win-amd64',
+            'arm' : 'win-arm32',
+        }
+    if ('VSCMD_ARG_TGT_ARCH' in os.environ and
+        os.environ['VSCMD_ARG_TGT_ARCH'] in TARGET_TO_PLAT):
+        return TARGET_TO_PLAT[os.environ['VSCMD_ARG_TGT_ARCH']]
+    elif 'amd64' in sys.version.lower():
+        return 'win-amd64'
+    elif '(arm)' in sys.version.lower():
+        return 'win-arm32'
+    elif '(arm64)' in sys.version.lower():
+        return 'win-arm64'
+    else:
+        return sys.platform
 
 def delete_registry_tree(root, subkey):
     try:
@@ -41,17 +61,28 @@ def setup_module(machinery, name, path=None):
         root = machinery.WindowsRegistryFinder.REGISTRY_KEY
     key = root.format(fullname=name,
                       sys_version='%d.%d' % sys.version_info[:2])
+    base_key = "Software\\Python\\PythonCore\\{}.{}".format(
+        sys.version_info.major, sys.version_info.minor)
+    assert key.casefold().startswith(base_key.casefold()), (
+        "expected key '{}' to start with '{}'".format(key, base_key))
     try:
         with temp_module(name, "a = 1") as location:
+            try:
+                OpenKey(HKEY_CURRENT_USER, base_key)
+                if machinery.WindowsRegistryFinder.DEBUG_BUILD:
+                    delete_key = os.path.dirname(key)
+                else:
+                    delete_key = key
+            except OSError:
+                delete_key = base_key
             subkey = CreateKey(HKEY_CURRENT_USER, key)
             if path is None:
                 path = location + ".py"
             SetValue(subkey, "", REG_SZ, path)
             yield
     finally:
-        if machinery.WindowsRegistryFinder.DEBUG_BUILD:
-            key = os.path.dirname(key)
-        delete_registry_tree(HKEY_CURRENT_USER, key)
+        if delete_key:
+            delete_registry_tree(HKEY_CURRENT_USER, delete_key)
 
 
 @unittest.skipUnless(sys.platform.startswith('win'), 'requires Windows')
@@ -65,19 +96,25 @@ class WindowsRegistryFinderTests:
         self.assertIs(spec, None)
 
     def test_find_module_missing(self):
-        loader = self.machinery.WindowsRegistryFinder.find_module('spam')
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            loader = self.machinery.WindowsRegistryFinder.find_module('spam')
         self.assertIs(loader, None)
 
     def test_module_found(self):
         with setup_module(self.machinery, self.test_module):
-            loader = self.machinery.WindowsRegistryFinder.find_module(self.test_module)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                loader = self.machinery.WindowsRegistryFinder.find_module(self.test_module)
             spec = self.machinery.WindowsRegistryFinder.find_spec(self.test_module)
             self.assertIsNot(loader, None)
             self.assertIsNot(spec, None)
 
     def test_module_not_found(self):
         with setup_module(self.machinery, self.test_module, path="."):
-            loader = self.machinery.WindowsRegistryFinder.find_module(self.test_module)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                loader = self.machinery.WindowsRegistryFinder.find_module(self.test_module)
             spec = self.machinery.WindowsRegistryFinder.find_spec(self.test_module)
             self.assertIsNone(loader)
             self.assertIsNone(spec)
@@ -100,7 +137,7 @@ class WindowsExtensionSuffixTests:
 
         self.assertIn(expected_tag, suffixes)
 
-        # Ensure the tags are in the correct order
+        # Ensure the tags are in the correct order.
         tagged_i = suffixes.index(expected_tag)
         self.assertLess(tagged_i, untagged_i)
 

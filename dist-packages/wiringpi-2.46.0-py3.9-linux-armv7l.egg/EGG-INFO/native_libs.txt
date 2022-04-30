@@ -1,1 +1,0 @@
-_wiringpi.cpython-35m-arm-linux-gnueabihf.so
