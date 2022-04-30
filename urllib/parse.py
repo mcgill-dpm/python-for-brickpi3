@@ -456,6 +456,11 @@ def urlsplit(url, scheme='', allow_fragments=True):
     """
 
     url, scheme, _coerce_result = _coerce_args(url, scheme)
+
+    for b in _UNSAFE_URL_BYTES_TO_REMOVE:
+        url = url.replace(b, "")
+        scheme = scheme.replace(b, "")
+
     allow_fragments = bool(allow_fragments)
     key = url, scheme, allow_fragments, type(url), type(scheme)
     cached = _parse_cache.get(key, None)
@@ -471,9 +476,6 @@ def urlsplit(url, scheme='', allow_fragments=True):
                 break
         else:
             scheme, url = url[:i].lower(), url[i+1:]
-
-    for b in _UNSAFE_URL_BYTES_TO_REMOVE:
-        url = url.replace(b, "")
 
     if url[:2] == '//':
         netloc, url = _splitnetloc(url, 2)
@@ -752,9 +754,8 @@ def parse_qsl(qs, keep_blank_values=False, strict_parsing=False,
         if max_num_fields < num_fields:
             raise ValueError('Max number of fields exceeded')
 
-    pairs = [s1 for s1 in qs.split(separator)]
     r = []
-    for name_value in pairs:
+    for name_value in qs.split(separator):
         if not name_value and not strict_parsing:
             continue
         nv = name_value.split('=', 1)

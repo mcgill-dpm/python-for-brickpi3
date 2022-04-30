@@ -70,10 +70,12 @@ Req-sent-unread-response       _CS_REQ_SENT       <response_class>
 
 import email.parser
 import email.message
+import errno
 import http
 import io
 import re
 import socket
+import sys
 import collections.abc
 from urllib.parse import urlsplit
 
@@ -201,15 +203,11 @@ class HTTPMessage(email.message.Message):
                 lst.append(line)
         return lst
 
-def parse_headers(fp, _class=HTTPMessage):
-    """Parses only RFC2822 headers from a file pointer.
+def _read_headers(fp):
+    """Reads potential header lines into a list from a file pointer.
 
-    email Parser wants to see strings rather than bytes.
-    But a TextIOWrapper around self.rfile would buffer too many bytes
-    from the stream, bytes which we later need to read as bytes.
-    So we read the correct bytes here, as bytes, for email Parser
-    to parse.
-
+    Length of line is limited by _MAXLINE, and number of
+    headers is limited by _MAXHEADERS.
     """
     headers = []
     while True:
@@ -221,6 +219,19 @@ def parse_headers(fp, _class=HTTPMessage):
             raise HTTPException("got more than %d headers" % _MAXHEADERS)
         if line in (b'\r\n', b'\n', b''):
             break
+    return headers
+
+def parse_headers(fp, _class=HTTPMessage):
+    """Parses only RFC2822 headers from a file pointer.
+
+    email Parser wants to see strings rather than bytes.
+    But a TextIOWrapper around self.rfile would buffer too many bytes
+    from the stream, bytes which we later need to read as bytes.
+    So we read the correct bytes here, as bytes, for email Parser
+    to parse.
+
+    """
+    headers = _read_headers(fp)
     hstring = b''.join(headers).decode('iso-8859-1')
     return email.parser.Parser(_class=_class).parsestr(hstring)
 
@@ -308,15 +319,10 @@ class HTTPResponse(io.BufferedIOBase):
             if status != CONTINUE:
                 break
             # skip the header from the 100 response
-            while True:
-                skip = self.fp.readline(_MAXLINE + 1)
-                if len(skip) > _MAXLINE:
-                    raise LineTooLong("header line")
-                skip = skip.strip()
-                if not skip:
-                    break
-                if self.debuglevel > 0:
-                    print("header:", skip)
+            skipped_headers = _read_headers(self.fp)
+            if self.debuglevel > 0:
+                print("headers:", skipped_headers)
+            del skipped_headers
 
         self.code = self.status = status
         self.reason = reason.strip()
@@ -449,18 +455,25 @@ class HTTPResponse(io.BufferedIOBase):
             self._close_conn()
             return b""
 
+        if self.chunked:
+            return self._read_chunked(amt)
+
         if amt is not None:
-            # Amount is given, implement using readinto
-            b = bytearray(amt)
-            n = self.readinto(b)
-            return memoryview(b)[:n].tobytes()
+            if self.length is not None and amt > self.length:
+                # clip the read to the "end of response"
+                amt = self.length
+            s = self.fp.read(amt)
+            if not s and amt:
+                # Ideally, we would raise IncompleteRead if the content-length
+                # wasn't satisfied, but it might break compatibility.
+                self._close_conn()
+            elif self.length is not None:
+                self.length -= len(s)
+                if not self.length:
+                    self._close_conn()
+            return s
         else:
             # Amount is not given (unbounded read) so we must check self.length
-            # and self.chunked
-
-            if self.chunked:
-                return self._readall_chunked()
-
             if self.length is None:
                 s = self.fp.read()
             else:
@@ -561,7 +574,7 @@ class HTTPResponse(io.BufferedIOBase):
             self.chunk_left = chunk_left
         return chunk_left
 
-    def _readall_chunked(self):
+    def _read_chunked(self, amt=None):
         assert self.chunked != _UNKNOWN
         value = []
         try:
@@ -569,7 +582,15 @@ class HTTPResponse(io.BufferedIOBase):
                 chunk_left = self._get_chunk_left()
                 if chunk_left is None:
                     break
+
+                if amt is not None and amt <= chunk_left:
+                    value.append(self._safe_read(amt))
+                    self.chunk_left = chunk_left - amt
+                    break
+
                 value.append(self._safe_read(chunk_left))
+                if amt is not None:
+                    amt -= chunk_left
                 self.chunk_left = 0
             return b''.join(value)
         except IncompleteRead:
@@ -916,9 +937,15 @@ class HTTPConnection:
 
     def connect(self):
         """Connect to the host and port specified in __init__."""
+        sys.audit("http.client.connect", self, self.host, self.port)
         self.sock = self._create_connection(
             (self.host,self.port), self.timeout, self.source_address)
-        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        # Might fail in OSs that don't implement TCP_NODELAY
+        try:
+             self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError as e:
+            if e.errno != errno.ENOPROTOOPT:
+                raise
 
         if self._tunnel_host:
             self._tunnel()
@@ -963,8 +990,10 @@ class HTTPConnection:
                     break
                 if encode:
                     datablock = datablock.encode("iso-8859-1")
+                sys.audit("http.client.send", self, datablock)
                 self.sock.sendall(datablock)
             return
+        sys.audit("http.client.send", self, data)
         try:
             self.sock.sendall(data)
         except TypeError:
@@ -1390,6 +1419,9 @@ else:
             self.cert_file = cert_file
             if context is None:
                 context = ssl._create_default_https_context()
+                # send ALPN extension to indicate HTTP/1.1 protocol
+                if self._http_vsn == 11:
+                    context.set_alpn_protocols(['http/1.1'])
                 # enable PHA for TLS 1.3 connections if available
                 if context.post_handshake_auth is not None:
                     context.post_handshake_auth = True

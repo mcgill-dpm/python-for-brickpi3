@@ -408,7 +408,7 @@ class UnparseTestCase(ASTTestCase):
 
 
 class CosmeticTestCase(ASTTestCase):
-    """Test if there are cosmetic issues caused by unnecesary additions"""
+    """Test if there are cosmetic issues caused by unnecessary additions"""
 
     def test_simple_expressions_parens(self):
         self.check_src_roundtrip("(a := b)")
@@ -518,7 +518,8 @@ class DirectoryTestCase(ASTTestCase):
     lib_dir = pathlib.Path(__file__).parent / ".."
     test_directories = (lib_dir, lib_dir / "test")
     run_always_files = {"test_grammar.py", "test_syntax.py", "test_compile.py",
-                        "test_ast.py", "test_asdl_parser.py", "test_fstring.py"}
+                        "test_ast.py", "test_asdl_parser.py", "test_fstring.py",
+                        "test_patma.py"}
 
     _files_to_test = None
 
